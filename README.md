@@ -1,6 +1,6 @@
 # Project-ESPNow
 未命名，可称为无线小纸条，无线同步触摸或者其他任意二创/开发名称
-此为开源项目，适用于常见的ESP32-CYD总成主板。Kurio Reiko感激一切对于本项目的支持，包括语言鼓励、项目转载、代码修缮或者产品再分发以及互补产品研发。商业化销售是被允许的，但是如果有人在未经声明原创作者而直接照搬代码进行商业化销售，那么他/她/它/They他妈的就是个傻逼。
+此为开源项目，适用于常见的ESP32-CYD总成主板。Kurio Reiko感激一切对于本项目的支持，包括语言鼓励、项目转载、代码修缮或者产品再分发以及互补产品研发。商业化销售是被允许的，但是如果有人在未经声明原创作者而直接照搬代码进行商业化销售，那确实挺弱智的。
 
 部分用户可能用的是这套板子：
 http://www.lcdwiki.com/zh/2.8inch_ESP32-32E_Display
@@ -29,13 +29,15 @@ http://www.lcdwiki.com/zh/2.8inch_ESP32-32E_Display
 
 ![8530af4605c7a8154c7da3b1ee96273](https://github.com/user-attachments/assets/0cfb522a-4bcd-4fe0-ae9b-543b141c9642)
 
-软件安装好后请安装库，开发板管理器中安装ESP32库、其他库中安装TFT_eSPl和XPT2046_Touchscreen如下图所示
+软件安装好后请安装库，开发板管理器中安装ESP32库、其他库中安装TFT_eSPl和XPT2046_Touchscreen还有SD如下图所示
 
 ![0de05df178e2b08b54926ae1c88cdae](https://github.com/user-attachments/assets/90418fd9-bcc1-4446-a9f6-36c669638444)
 ![440da2c0a98be0fd6a5adc249efe432](https://github.com/user-attachments/assets/6398bf2c-6574-4ca7-817d-8f34544c15ce)
 ![6537afb5af77f23defc3eefc73c458d](https://github.com/user-attachments/assets/acfadf4d-358b-4e83-a0da-104a2d96e4e2)
+<img width="364" height="243" alt="1 }X`W72BQTG4IR_`QSO})V" src="https://github.com/user-attachments/assets/d3bff793-fb25-41a7-8de2-f93e9af46afd" />
 
-检查一下，TFT_eSPl和XPT2046_Touchscreen同样重要，不要漏了
+
+检查一下，TFT_eSPl和XPT2046_Touchscreen还有SD同样重要，不要漏了
 
 #### 请注意，ESP32库耗时漫长且不一定能一次下载成功，故建议你提前一两天安装
 
