@@ -39,10 +39,10 @@ http://www.lcdwiki.com/zh/2.8inch_ESP32-32E_Display
 
 检查一下，TFT_eSPl和XPT2046_Touchscreen还有SD同样重要，不要漏了
 
-#### 请注意，ESP32库耗时漫长且不一定能一次下载成功，故建议你提前一两天安装
+#### 请注意，ESP32库耗时漫长且不一定能一次下载成功，可能需要梯子。如果不行，可以参考https://blog.csdn.net/Lucife0/article/details/145548563进行离线安装
 
 ### 2.修改TFT的setup.h
-详见主页User_Setup.h和其相关介绍
+<del>（详见主页User_Setup.h和其相关介绍）</del> 已经不需要了。
 
 ### 3.配置端口和版型
 
