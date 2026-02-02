@@ -1,0 +1,955 @@
+#include <SPI.h>
+#include <XPT2046_Touchscreen.h>
+#include <TFT_eSPI.h>
+#include <esp_now.h>
+#include <WiFi.h>
+#include <queue>
+#include <set>
+#include <vector>
+
+// 定义触摸屏引脚
+#define XPT2046_IRQ 36
+#define XPT2046_MOSI 32
+#define XPT2046_MISO 39
+#define XPT2046_CLK 25
+#define XPT2046_CS 33
+
+// 定义 IO0 按钮引脚
+#define BUTTON_IO0 0
+#define TFT_BL 21
+#define GREEN_LED 16
+#define BLUE_LED 17
+#define RED_LED 22
+#define BATTERY_PIN 34
+
+// 校准参数
+#define TOUCH_MIN_X 200
+#define TOUCH_MAX_X 3700
+#define TOUCH_MIN_Y 300
+#define TOUCH_MAX_Y 3800
+
+// 屏幕宽高
+#define SCREEN_WIDTH 320
+#define SCREEN_HEIGHT 240
+
+// 工具栏相关定义
+#define TOOLBAR_HEIGHT 40
+#define TOOLBAR_BUTTON_SIZE 36
+#define TOOLBAR_BUTTON_SPACING 8
+#define TOOLBAR_PADDING 2
+
+// 定义工具栏按钮
+#define BUTTON_COLOR_PICKER 0
+#define BUTTON_ERASER 1
+#define BUTTON_SLEEP 2
+#define BUTTON_BATTERY 3
+#define BUTTON_TOTAL 4
+
+// 笔迹粗细定义
+#define PEN_SIZE_SMALL 1
+#define PEN_SIZE_MEDIUM 3
+#define PEN_SIZE_LARGE 5
+int currentPenSize = PEN_SIZE_MEDIUM;
+
+// 橡皮擦大小定义
+#define ERASER_SIZE_SMALL 5
+#define ERASER_SIZE_MEDIUM 10
+#define ERASER_SIZE_LARGE 15
+int currentEraserSize = ERASER_SIZE_MEDIUM;
+
+// 预设颜色
+#define COLOR_PRESET_COUNT 8
+uint32_t presetColors[COLOR_PRESET_COUNT] = {
+    TFT_RED, TFT_GREEN, TFT_BLUE, TFT_YELLOW,
+    TFT_CYAN, TFT_MAGENTA, TFT_WHITE, TFT_ORANGE
+};
+
+// 弹出面板相关常量
+#define POPUP_MARGIN 4
+#define POPUP_COLOR_SIZE 30
+#define POPUP_WIDTH (POPUP_COLOR_SIZE * 4 + POPUP_MARGIN * 5)
+#define POPUP_HEIGHT (POPUP_COLOR_SIZE * 2 + POPUP_MARGIN * 3 + 40)
+#define POPUP_PEN_HEIGHT 30
+
+// 色轮相关常量
+#define COLOR_WHEEL_RADIUS 60
+#define COLOR_WHEEL_X (SCREEN_WIDTH / 2)
+#define COLOR_WHEEL_Y (SCREEN_HEIGHT / 2 - 30)
+#define COLOR_PREVIEW_SIZE 30
+#define HUE_CIRCLE_WIDTH 20
+
+// ESP-NOW 数据结构
+typedef struct {
+    int x;
+    int y;
+    unsigned long timestamp;
+    bool isReset;
+    bool isLocalDevice;
+    uint32_t color;
+    bool isErase;
+    int penSize;
+} TouchData;
+
+typedef struct {
+    float x;
+    float y;
+    bool fly = false;
+} XY_structure;
+
+// 呼吸灯相关变量
+int breathBrightness = 0;
+int breathDirection = 5;
+unsigned long lastBreathTime = 0;
+bool hasNewUpdateWhileScreenOff = false;
+
+// 创建 SPI 和触摸屏对象
+SPIClass mySpi = SPIClass(VSPI);
+XPT2046_Touchscreen ts(XPT2046_CS, XPT2046_IRQ);
+TFT_eSPI tft = TFT_eSPI();
+
+// 全局变量
+std::queue<TouchData> remoteQueue;
+std::set<String> macSet;
+TS_Point lastLocalPoint = {0, 0, 0};
+TS_Point lastRemotePoint = {0, 0, 0};
+unsigned long lastLocalTouchTime = 0;
+unsigned long lastRemoteTime = 0;
+unsigned long touchInterval = 50;
+
+// ESP-NOW 广播地址
+uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+// 当前画笔颜色
+uint32_t currentColor = TFT_BLUE;
+
+// 彩蛋相关变量
+unsigned long lastResetTime = 0;
+int resetPressCount = 0;
+
+// 定时广播间隔
+#define BROADCAST_INTERVAL 2000
+unsigned long lastBroadcastTime = 0;
+
+// 颜色选择界面状态
+bool inColorWheelMode = false;
+
+// 色轮HSV值
+float currentHue = 0;
+float currentSaturation = 1.0;
+float currentValue = 1.0;
+
+// RGB值
+int redValue = 255;
+int greenValue = 255;
+int blueValue = 255;
+
+// 颜色选择器尺寸
+#define COLOR_SLIDER_WIDTH 20
+#define COLOR_SLIDER_HEIGHT ((SCREEN_HEIGHT - 10) / 3)
+
+// 保存调色界面之前的屏幕截图
+uint16_t* savedScreenBuffer = nullptr;
+
+// 保存远程绘制数据
+std::vector<TouchData> remoteDrawings;
+
+// 息屏相关变量
+bool isScreenOn = true;
+const int BLUE_LED_DIM = 14;
+const int RED_LED_DIM = 4;
+
+// 橡皮擦模式
+bool isEraseMode = false;
+
+// 弹出面板显示
+bool showColorPopup = false;
+bool showEraserPopup = false;
+unsigned long popupDisplayTime = 0;
+#define POPUP_TIMEOUT 5000
+
+// 保存色轮小圈位置
+int lastSelectedX = 0;
+int lastSelectedY = 0;
+
+// 绘制工具栏按钮
+void drawToolbarButton(int index, uint32_t color, const char* icon) {
+    int x = TOOLBAR_PADDING + index * (TOOLBAR_BUTTON_SIZE + TOOLBAR_BUTTON_SPACING);
+    int y = SCREEN_HEIGHT - TOOLBAR_HEIGHT + TOOLBAR_PADDING;
+
+    tft.fillRoundRect(x, y, TOOLBAR_BUTTON_SIZE, TOOLBAR_BUTTON_SIZE, 5, color);
+    tft.setTextColor(TFT_WHITE);
+    tft.setTextDatum(CC_DATUM);
+    tft.drawString(icon, x + TOOLBAR_BUTTON_SIZE / 2, y + TOOLBAR_BUTTON_SIZE / 2);
+}
+
+// 绘制工具栏
+void drawToolbar() {
+    tft.fillRect(0, SCREEN_HEIGHT - TOOLBAR_HEIGHT, SCREEN_WIDTH, TOOLBAR_HEIGHT, TFT_DARKGREY);
+
+    drawToolbarButton(BUTTON_COLOR_PICKER, currentColor, "C");
+    drawToolbarButton(BUTTON_ERASER, isEraseMode ? TFT_BLACK : TFT_WHITE, "E");
+    drawToolbarButton(BUTTON_SLEEP, TFT_BLUE, "S");
+
+    float batteryPercentage = readBatteryVoltagePercentage();
+    char batteryStr[5];
+    sprintf(batteryStr, "%d%%", (int)batteryPercentage);
+    drawToolbarButton(BUTTON_BATTERY, TFT_GREEN, batteryStr);
+
+    char deviceCountStr[5];
+    sprintf(deviceCountStr, "%d", (int)macSet.size());
+    tft.setTextColor(TFT_WHITE);
+    tft.drawString(deviceCountStr, SCREEN_WIDTH - 20, SCREEN_HEIGHT - TOOLBAR_HEIGHT / 2);
+}
+
+// 检查工具栏按钮点击
+int checkToolbarButtonPress(int x, int y) {
+    if (y < SCREEN_HEIGHT - TOOLBAR_HEIGHT) {
+        return -1;
+    }
+
+    for (int i = 0; i < BUTTON_TOTAL; i++) {
+        int buttonX = TOOLBAR_PADDING + i * (TOOLBAR_BUTTON_SIZE + TOOLBAR_BUTTON_SPACING);
+        int buttonY = SCREEN_HEIGHT - TOOLBAR_HEIGHT + TOOLBAR_PADDING;
+
+        if (x >= buttonX && x <= buttonX + TOOLBAR_BUTTON_SIZE &&
+            y >= buttonY && y <= buttonY + TOOLBAR_BUTTON_SIZE) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+// 绘制颜色选择弹出面板
+void drawColorPopup() {
+    int popupX = TOOLBAR_PADDING;
+    int popupY = SCREEN_HEIGHT - TOOLBAR_HEIGHT - POPUP_HEIGHT - POPUP_MARGIN;
+
+    tft.fillRoundRect(popupX, popupY, POPUP_WIDTH, POPUP_HEIGHT, 10, TFT_DARKGREY);
+    tft.drawRoundRect(popupX, popupY, POPUP_WIDTH, POPUP_HEIGHT, 10, TFT_WHITE);
+
+    for (int i = 0; i < COLOR_PRESET_COUNT; i++) {
+        int row = i / 4;
+        int col = i % 4;
+        int colorX = popupX + POPUP_MARGIN + col * (POPUP_COLOR_SIZE + POPUP_MARGIN);
+        int colorY = popupY + POPUP_MARGIN + row * (POPUP_COLOR_SIZE + POPUP_MARGIN);
+
+        tft.fillRoundRect(colorX, colorY, POPUP_COLOR_SIZE, POPUP_COLOR_SIZE, 5, presetColors[i]);
+    }
+
+    int penY = popupY + 2 * (POPUP_COLOR_SIZE + POPUP_MARGIN) + 5;
+
+    tft.fillRoundRect(popupX + POPUP_MARGIN, penY, POPUP_PEN_HEIGHT, POPUP_PEN_HEIGHT, 5, currentPenSize == PEN_SIZE_SMALL ? TFT_WHITE : TFT_DARKGREY);
+    tft.fillCircle(popupX + POPUP_MARGIN + POPUP_PEN_HEIGHT / 2, penY + POPUP_PEN_HEIGHT / 2, PEN_SIZE_SMALL, currentColor);
+
+    tft.fillRoundRect(popupX + POPUP_MARGIN * 2 + POPUP_PEN_HEIGHT, penY, POPUP_PEN_HEIGHT, POPUP_PEN_HEIGHT, 5, currentPenSize == PEN_SIZE_MEDIUM ? TFT_WHITE : TFT_DARKGREY);
+    tft.fillCircle(popupX + POPUP_MARGIN * 2 + POPUP_PEN_HEIGHT + POPUP_PEN_HEIGHT / 2, penY + POPUP_PEN_HEIGHT / 2, PEN_SIZE_MEDIUM, currentColor);
+
+    tft.fillRoundRect(popupX + POPUP_MARGIN * 3 + POPUP_PEN_HEIGHT * 2, penY, POPUP_PEN_HEIGHT, POPUP_PEN_HEIGHT, 5, currentPenSize == PEN_SIZE_LARGE ? TFT_WHITE : TFT_DARKGREY);
+    tft.fillCircle(popupX + POPUP_MARGIN * 3 + POPUP_PEN_HEIGHT * 2 + POPUP_PEN_HEIGHT / 2, penY + POPUP_PEN_HEIGHT / 2, PEN_SIZE_LARGE, currentColor);
+
+    tft.fillRoundRect(popupX + POPUP_MARGIN * 4 + POPUP_PEN_HEIGHT * 3, penY, POPUP_PEN_HEIGHT, POPUP_PEN_HEIGHT, 5, TFT_DARKGREY);
+
+    int centerX = popupX + POPUP_MARGIN * 4 + POPUP_PEN_HEIGHT * 3 + POPUP_PEN_HEIGHT / 2;
+    int centerY = penY + POPUP_PEN_HEIGHT / 2;
+    int wheelRadius = POPUP_PEN_HEIGHT / 2 - 3;
+
+    for (int angle = 0; angle < 360; angle += 30) {
+        float radians = angle * PI / 180.0;
+        int x = centerX + cos(radians) * wheelRadius;
+        int y = centerY + sin(radians) * wheelRadius;
+
+        uint32_t color = HSVtoRGB(angle / 360.0, 1.0, 1.0);
+        tft.fillCircle(x, y, 2, color);
+    }
+}
+
+// 绘制橡皮擦大小选择弹出面板
+void drawEraserPopup() {
+    int popupX = TOOLBAR_PADDING + (TOOLBAR_BUTTON_SIZE + TOOLBAR_BUTTON_SPACING);
+    int popupY = SCREEN_HEIGHT - TOOLBAR_HEIGHT - 100 - POPUP_MARGIN;
+    int popupWidth = 150;
+    int popupHeight = 100;
+
+    tft.fillRoundRect(popupX, popupY, popupWidth, popupHeight, 10, TFT_DARKGREY);
+    tft.drawRoundRect(popupX, popupY, popupWidth, popupHeight, 10, TFT_WHITE);
+
+    tft.setTextColor(TFT_WHITE);
+    tft.drawString("Eraser Size", popupX + popupWidth / 2, popupY + 15);
+
+    tft.fillRoundRect(popupX + 10, popupY + 30, 40, 40, 5, currentEraserSize == ERASER_SIZE_SMALL ? TFT_WHITE : TFT_DARKGREY);
+    tft.fillCircle(popupX + 10 + 20, popupY + 30 + 20, ERASER_SIZE_SMALL / 2, TFT_BLACK);
+    tft.drawString("S", popupX + 10 + 20, popupY + 30 + 40 + 10);
+
+    tft.fillRoundRect(popupX + 60, popupY + 30, 40, 40, 5, currentEraserSize == ERASER_SIZE_MEDIUM ? TFT_WHITE : TFT_DARKGREY);
+    tft.fillCircle(popupX + 60 + 20, popupY + 30 + 20, ERASER_SIZE_MEDIUM / 2, TFT_BLACK);
+    tft.drawString("M", popupX + 60 + 20, popupY + 30 + 40 + 10);
+
+    tft.fillRoundRect(popupX + 110, popupY + 30, 40, 40, 5, currentEraserSize == ERASER_SIZE_LARGE ? TFT_WHITE : TFT_DARKGREY);
+    tft.fillCircle(popupX + 110 + 20, popupY + 30 + 20, ERASER_SIZE_LARGE / 2, TFT_BLACK);
+    tft.drawString("L", popupX + 110 + 20, popupY + 30 + 40 + 10);
+}
+
+// 读取电池电量并转换为百分比
+float readBatteryVoltagePercentage() {
+    int adcValue = analogRead(BATTERY_PIN);
+    float voltage = (adcValue / 4095.0) * 3.3;
+    voltage *= 2;
+
+    float percentage = (voltage - 2.25) / (3.9 - 2.25) * 100;
+    return constrain(percentage, 0, 100);
+}
+
+// 将HSV转换为RGB颜色
+uint32_t HSVtoRGB(float h, float s, float v) {
+    float r, g, b;
+    int i = floor(h * 6);
+    float f = h * 6 - i;
+    float p = v * (1 - s);
+    float q = v * (1 - f * s);
+    float t = v * (1 - (1 - f) * s);
+
+    switch (i % 6) {
+        case 0: r = v; g = t; b = p; break;
+        case 1: r = q; g = v; b = p; break;
+        case 2: r = p; g = v; b = t; break;
+        case 3: r = p; g = q; b = v; break;
+        case 4: r = t; g = p; b = v; break;
+        case 5: r = v; g = p; b = q; break;
+    }
+
+    redValue = r * 255;
+    greenValue = g * 255;
+    blueValue = b * 255;
+
+    return tft.color565(redValue, greenValue, blueValue);
+}
+
+// 绘制色轮
+void drawColorWheel() {
+    static bool wheelDrawn = false;
+
+    if (!wheelDrawn) {
+        for (int y = COLOR_WHEEL_Y - COLOR_WHEEL_RADIUS; y <= COLOR_WHEEL_Y + COLOR_WHEEL_RADIUS; y++) {
+            for (int x = COLOR_WHEEL_X - COLOR_WHEEL_RADIUS; x <= COLOR_WHEEL_X + COLOR_WHEEL_RADIUS; x++) {
+                int dx = x - COLOR_WHEEL_X;
+                int dy = y - COLOR_WHEEL_Y;
+                float distance = sqrt(dx * dx + dy * dy);
+
+                if (distance <= COLOR_WHEEL_RADIUS) {
+                    float angle = atan2(dy, dx) * 180 / PI;
+                    if (angle < 0) angle += 360;
+                    float saturation = distance / COLOR_WHEEL_RADIUS;
+                    float hue = angle / 360.0;
+                    uint32_t color = HSVtoRGB(hue, saturation, 1.0);
+                    tft.drawPixel(x, y, color);
+                }
+            }
+        }
+        wheelDrawn = true;
+    }
+
+    int brightnessSliderX = SCREEN_WIDTH - 40;
+    int brightnessSliderY = 50;
+    int brightnessSliderHeight = 150;
+    int brightnessSliderWidth = 20;
+
+    for (int y = 0; y < brightnessSliderHeight; y++) {
+        float val = 1.0 - (float)y / brightnessSliderHeight;
+        uint32_t color = HSVtoRGB(currentHue, currentSaturation, val);
+        tft.drawFastHLine(brightnessSliderX, brightnessSliderY + y, brightnessSliderWidth, color);
+    }
+
+    uint32_t currentRgbColor = HSVtoRGB(currentHue, currentSaturation, currentValue);
+    tft.fillRoundRect(COLOR_WHEEL_X - COLOR_PREVIEW_SIZE / 2, COLOR_WHEEL_Y + COLOR_WHEEL_RADIUS + 20, COLOR_PREVIEW_SIZE, COLOR_PREVIEW_SIZE, 5, currentRgbColor);
+
+    tft.fillRoundRect(COLOR_WHEEL_X - 40, COLOR_WHEEL_Y + COLOR_WHEEL_RADIUS + 60, 80, 30, 5, TFT_DARKGREY);
+    tft.setTextColor(TFT_WHITE);
+    tft.setTextDatum(CC_DATUM);
+    tft.drawString("OK", COLOR_WHEEL_X, COLOR_WHEEL_Y + COLOR_WHEEL_RADIUS + 75);
+
+    int selectedX = COLOR_WHEEL_X + cos(currentHue * 2 * PI) * currentSaturation * COLOR_WHEEL_RADIUS;
+    int selectedY = COLOR_WHEEL_Y + sin(currentHue * 2 * PI) * currentSaturation * COLOR_WHEEL_RADIUS;
+    tft.drawCircle(selectedX, selectedY, 5, TFT_WHITE);
+
+    int brightnessIndicatorY = brightnessSliderY + (1.0 - currentValue) * brightnessSliderHeight;
+    tft.drawLine(brightnessSliderX - 5, brightnessIndicatorY, brightnessSliderX + brightnessSliderWidth + 5, brightnessIndicatorY, TFT_WHITE);
+}
+
+// 处理色轮触摸
+void handleColorWheelTouch(int x, int y) {
+    int dx = x - COLOR_WHEEL_X;
+    int dy = y - COLOR_WHEEL_Y;
+    float distance = sqrt(dx * dx + dy * dy);
+
+    if (distance <= COLOR_WHEEL_RADIUS) {
+        float angle = atan2(dy, dx) * 180 / PI;
+        if (angle < 0) angle += 360;
+        float saturation = distance / COLOR_WHEEL_RADIUS;
+
+        currentHue = angle / 360.0;
+        currentSaturation = saturation;
+
+        // 清除之前的小圈
+        tft.drawCircle(lastSelectedX, lastSelectedY, 5, TFT_BLACK);
+
+        uint32_t color = HSVtoRGB(currentHue, currentSaturation, currentValue);
+        tft.fillRoundRect(COLOR_WHEEL_X - COLOR_PREVIEW_SIZE / 2, COLOR_WHEEL_Y + COLOR_WHEEL_RADIUS + 20, COLOR_PREVIEW_SIZE, COLOR_PREVIEW_SIZE, 5, color);
+        drawColorWheel();
+
+        // 保存当前的小圈位置
+        lastSelectedX = x;
+        lastSelectedY = y;
+        return;
+    }
+
+    int brightnessSliderX = SCREEN_WIDTH - 40;
+    int brightnessSliderY = 50;
+    int brightnessSliderHeight = 150;
+    int brightnessSliderWidth = 20;
+
+    if (x >= brightnessSliderX && x <= brightnessSliderX + brightnessSliderWidth &&
+        y >= brightnessSliderY && y <= brightnessSliderY + brightnessSliderHeight) {
+        currentValue = 1.0 - (float)(y - brightnessSliderY) / brightnessSliderHeight;
+        currentValue = constrain(currentValue, 0.0, 1.0);
+
+        uint32_t color = HSVtoRGB(currentHue, currentSaturation, currentValue);
+        tft.fillRoundRect(COLOR_WHEEL_X - COLOR_PREVIEW_SIZE / 2, COLOR_WHEEL_Y + COLOR_WHEEL_RADIUS + 20, COLOR_PREVIEW_SIZE, COLOR_PREVIEW_SIZE, 5, color);
+        drawColorWheel();
+        return;
+    }
+
+    if (x >= COLOR_WHEEL_X - 40 && x <= COLOR_WHEEL_X + 40 &&
+        y >= COLOR_WHEEL_Y + COLOR_WHEEL_RADIUS + 60 && y <= COLOR_WHEEL_Y + COLOR_WHEEL_RADIUS + 90) {
+        uint32_t selectedColor = HSVtoRGB(currentHue, currentSaturation, currentValue);
+        currentColor = selectedColor;
+        isEraseMode = false;
+        inColorWheelMode = false;
+        tft.fillScreen(TFT_BLACK);
+        drawToolbar();
+        return;
+    }
+}
+
+// 检查触摸点是否在弹出面板内
+bool isPointInPopup(int x, int y) {
+    if (showColorPopup) {
+        int popupX = TOOLBAR_PADDING;
+        int popupY = SCREEN_HEIGHT - TOOLBAR_HEIGHT - POPUP_HEIGHT - POPUP_MARGIN;
+        return x >= popupX && x <= popupX + POPUP_WIDTH && y >= popupY && y <= popupY + POPUP_HEIGHT;
+    }
+
+    if (showEraserPopup) {
+        int popupX = TOOLBAR_PADDING + (TOOLBAR_BUTTON_SIZE + TOOLBAR_BUTTON_SPACING);
+        int popupY = SCREEN_HEIGHT - TOOLBAR_HEIGHT - 100 - POPUP_MARGIN;
+        return x >= popupX && x <= popupX + 150 && y >= popupY && y <= popupY + 100;
+    }
+
+    return false;
+}
+
+// 处理本地触摸绘制
+void handleLocalTouch() {
+    float x1, y1;
+    bool touched = ts.tirqTouched() && ts.touched();
+    unsigned long currentTime = millis();
+    XY_structure xy1;
+
+    if (touched) {
+        xy1 = averageXY();
+        x1 = xy1.x;
+        y1 = xy1.y;
+
+        if (!xy1.fly) {
+            int mapX = map(x1, TOUCH_MIN_X, TOUCH_MAX_X, 0, SCREEN_WIDTH);
+            int mapY = map(y1, TOUCH_MIN_Y, TOUCH_MAX_Y, 0, SCREEN_HEIGHT);
+
+            // 检查是否点击了颜色弹出面板
+            if (showColorPopup) {
+                checkColorPopupPress(mapX, mapY);
+                return;
+            }
+
+            // 检查是否点击了橡皮擦弹出面板
+            if (showEraserPopup) {
+                checkEraserPopupPress(mapX, mapY);
+                return;
+            }
+
+            // 检查是否点击了色轮面板
+            if (inColorWheelMode) {
+                handleColorWheelTouch(mapX, mapY);
+                return;
+            }
+
+            // 检查是否点击了工具栏按钮
+            int buttonPressed = checkToolbarButtonPress(mapX, mapY);
+            if (buttonPressed >= 0) {
+                switch (buttonPressed) {
+                    case BUTTON_COLOR_PICKER:
+                        showColorPopup = true;
+                        popupDisplayTime = currentTime;
+                        drawColorPopup();
+                        return;
+
+                    case BUTTON_ERASER:
+                        if (isEraseMode) {
+                            showEraserPopup = true;
+                            popupDisplayTime = currentTime;
+                            drawEraserPopup();
+                        } else {
+                            isEraseMode = true;
+                            drawToolbar();
+                        }
+                        return;
+
+                    case BUTTON_SLEEP:
+                        if (isScreenOn) {
+                            digitalWrite(TFT_BL, LOW);
+                            isScreenOn = false;
+                        } else {
+                            digitalWrite(TFT_BL, HIGH);
+                            analogWrite(GREEN_LED, 255);
+                            hasNewUpdateWhileScreenOff = false;
+                            isScreenOn = true;
+                            drawToolbar();
+                        }
+                        return;
+
+                    case BUTTON_BATTERY:
+                        return;
+                }
+            }
+
+            // 检查是否在工具栏区域
+            if (mapY >= SCREEN_HEIGHT - TOOLBAR_HEIGHT) {
+                return;
+            }
+
+            // 检查是否在弹出面板区域
+            if (showColorPopup || showEraserPopup || inColorWheelMode) {
+                if (!isPointInPopup(mapX, mapY)) {
+                    showColorPopup = false;
+                    showEraserPopup = false;
+                    inColorWheelMode = false;
+                    drawToolbar();
+                }
+                return;
+            }
+
+            // 处理正常绘图区域的触摸
+            if (isEraseMode) {
+                tft.fillCircle(mapX, mapY, currentEraserSize / 2, TFT_BLACK);
+            } else {
+                if (currentTime - lastLocalTouchTime > touchInterval) {
+                    tft.fillCircle(mapX, mapY, currentPenSize, currentColor);
+                } else {
+                    int steps = 5;
+                    for (int i = 1; i <= steps; i++) {
+                        float t = i / (float)steps;
+                        int interpX = lastLocalPoint.x + (mapX - lastLocalPoint.x) * t;
+                        int interpY = lastLocalPoint.y + (mapY - lastLocalPoint.y) * t;
+                        tft.fillCircle(interpX, interpY, currentPenSize, currentColor);
+                    }
+                }
+            }
+
+            lastLocalPoint = {mapX, mapY, 1};
+            lastLocalTouchTime = currentTime;
+
+            // 创建触摸数据结构并发送
+            TouchData data = {x1, y1, currentTime, false, true, currentColor, isEraseMode, isEraseMode ? currentEraserSize : currentPenSize};
+            sendTouchData(data);
+        }
+    } else {
+        lastLocalPoint.z = 0;
+    }
+
+    // 检查弹出框是否超时
+    if ((showColorPopup || showEraserPopup) && currentTime - popupDisplayTime > POPUP_TIMEOUT) {
+        showColorPopup = false;
+        showEraserPopup = false;
+        inColorWheelMode = false;
+        drawToolbar();
+    }
+}
+
+// 处理远程触摸数据
+void handleRemoteTouch() {
+    while (!remoteQueue.empty()) {
+        TouchData data = remoteQueue.front();
+        remoteQueue.pop();
+
+        int mapX = map(data.x, TOUCH_MIN_X, TOUCH_MAX_X, 0, SCREEN_WIDTH);
+        int mapY = map(data.y, TOUCH_MIN_Y, TOUCH_MAX_Y, 0, SCREEN_HEIGHT);
+
+        // 忽略工具栏区域的绘制
+        if (mapY >= SCREEN_HEIGHT - TOOLBAR_HEIGHT) {
+            continue;
+        }
+
+        if (data.isErase) {
+            tft.fillCircle(mapX, mapY, data.penSize / 2, TFT_BLACK);
+        } else {
+            if (data.timestamp - lastRemoteTime > touchInterval) {
+                tft.fillCircle(mapX, mapY, data.penSize, data.color);
+            } else {
+                int steps = 5;
+                for (int i = 1; i <= steps; i++) {
+                    float t = i / (float)steps;
+                    int interpX = lastRemotePoint.x + (mapX - lastRemotePoint.x) * t;
+                    int interpY = lastRemotePoint.y + (mapY - lastRemotePoint.y) * t;
+                    tft.fillCircle(interpX, interpY, data.penSize, data.color);
+                }
+            }
+        }
+
+        lastRemotePoint = {mapX, mapY, 1};
+        lastRemoteTime = data.timestamp;
+
+        remoteDrawings.push_back(data);
+    }
+}
+
+// 发送触摸数据
+void sendTouchData(TouchData data) {
+    esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *)&data, sizeof(data));
+    if (result != ESP_OK) {
+        Serial.println("Error sending data, retrying...");
+        delay(100);
+        result = esp_now_send(broadcastAddress, (uint8_t *)&data, sizeof(data));
+    }
+    if (result != ESP_OK) {
+        Serial.println("Failed to send data after retry");
+    }
+}
+
+// 接收数据回调函数
+void OnDataRecv(const esp_now_recv_info *info, const uint8_t *incomingDataPtr, int len) {
+    TouchData receivedData;
+    memcpy(&receivedData, incomingDataPtr, sizeof(receivedData));
+
+    char macStr[18];
+    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+             info->src_addr[0], info->src_addr[1], info->src_addr[2],
+             info->src_addr[3], info->src_addr[4], info->src_addr[5]);
+    macSet.insert(String(macStr));
+
+    if (receivedData.isReset) {
+        clearScreenAndCache();
+    } else if (receivedData.isErase) {
+        remoteQueue.push(receivedData);
+    } else {
+        remoteQueue.push(receivedData);
+        if (!isScreenOn) {
+            hasNewUpdateWhileScreenOff = true;
+        }
+    }
+}
+
+// 保存屏幕区域
+void saveScreenArea() {
+    if (savedScreenBuffer == nullptr) {
+        savedScreenBuffer = (uint16_t*)malloc(SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(uint16_t));
+    }
+    if (savedScreenBuffer != nullptr) {
+        tft.readRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, savedScreenBuffer);
+    }
+}
+
+// 恢复屏幕区域
+void restoreSavedScreenArea() {
+    if (savedScreenBuffer != nullptr) {
+        tft.pushImage(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, savedScreenBuffer);
+    }
+}
+
+// 检查颜色弹出面板点击
+void checkColorPopupPress(int x, int y) {
+    int popupX = TOOLBAR_PADDING;
+    int popupY = SCREEN_HEIGHT - TOOLBAR_HEIGHT - POPUP_HEIGHT - POPUP_MARGIN;
+
+    if (x < popupX || x > popupX + POPUP_WIDTH || y < popupY || y > popupY + POPUP_HEIGHT) {
+        showColorPopup = false;
+        drawToolbar();
+        return;
+    }
+
+    for (int i = 0; i < COLOR_PRESET_COUNT; i++) {
+        int row = i / 4;
+        int col = i % 4;
+        int colorX = popupX + POPUP_MARGIN + col * (POPUP_COLOR_SIZE + POPUP_MARGIN);
+        int colorY = popupY + POPUP_MARGIN + row * (POPUP_COLOR_SIZE + POPUP_MARGIN);
+
+        if (x >= colorX && x <= colorX + POPUP_COLOR_SIZE &&
+            y >= colorY && y <= colorY + POPUP_COLOR_SIZE) {
+            currentColor = presetColors[i];
+            isEraseMode = false;
+            showColorPopup = false;
+            drawToolbar();
+            return;
+        }
+    }
+
+    int penY = popupY + 2 * (POPUP_COLOR_SIZE + POPUP_MARGIN) + 5;
+
+    if (x >= popupX + POPUP_MARGIN && x <= popupX + POPUP_MARGIN + POPUP_PEN_HEIGHT &&
+        y >= penY && y <= penY + POPUP_PEN_HEIGHT) {
+        currentPenSize = PEN_SIZE_SMALL;
+        drawColorPopup();
+        return;
+    }
+
+    if (x >= popupX + POPUP_MARGIN * 2 + POPUP_PEN_HEIGHT && x <= popupX + POPUP_MARGIN * 2 + POPUP_PEN_HEIGHT * 2 &&
+        y >= penY && y <= penY + POPUP_PEN_HEIGHT) {
+        currentPenSize = PEN_SIZE_MEDIUM;
+        drawColorPopup();
+        return;
+    }
+
+    if (x >= popupX + POPUP_MARGIN * 3 + POPUP_PEN_HEIGHT * 2 && x <= popupX + POPUP_MARGIN * 3 + POPUP_PEN_HEIGHT * 3 &&
+        y >= penY && y <= penY + POPUP_PEN_HEIGHT) {
+        currentPenSize = PEN_SIZE_LARGE;
+        drawColorPopup();
+        return;
+    }
+
+    if (x >= popupX + POPUP_MARGIN * 4 + POPUP_PEN_HEIGHT * 3 && x <= popupX + POPUP_MARGIN * 4 + POPUP_PEN_HEIGHT * 4 &&
+        y >= penY && y <= penY + POPUP_PEN_HEIGHT) {
+        showColorPopup = false;
+        inColorWheelMode = true;
+        saveScreenArea();
+        drawColorWheel();
+        return;
+    }
+}
+
+// 检查橡皮擦弹出面板点击
+void checkEraserPopupPress(int x, int y) {
+    int popupX = TOOLBAR_PADDING + (TOOLBAR_BUTTON_SIZE + TOOLBAR_BUTTON_SPACING);
+    int popupY = SCREEN_HEIGHT - TOOLBAR_HEIGHT - 100 - POPUP_MARGIN;
+    int popupWidth = 150;
+    int popupHeight = 100;
+
+    if (x < popupX || x > popupX + popupWidth || y < popupY || y > popupY + popupHeight) {
+        showEraserPopup = false;
+        drawToolbar();
+        return;
+    }
+
+    if (x >= popupX + 10 && x <= popupX + 10 + 40 && y >= popupY + 30 && y <= popupY + 30 + 40) {
+        currentEraserSize = ERASER_SIZE_SMALL;
+        showEraserPopup = false;
+        drawToolbar();
+        return;
+    }
+
+    if (x >= popupX + 60 && x <= popupX + 60 + 40 && y >= popupY + 30 && y <= popupY + 30 + 40) {
+        currentEraserSize = ERASER_SIZE_MEDIUM;
+        showEraserPopup = false;
+        drawToolbar();
+        return;
+    }
+
+    if (x >= popupX + 110 && x <= popupX + 110 + 40 && y >= popupY + 30 && y <= popupY + 30 + 40) {
+        currentEraserSize = ERASER_SIZE_LARGE;
+        showEraserPopup = false;
+        drawToolbar();
+        return;
+    }
+}
+
+// 更新呼吸灯效果
+void updateBreathLED() {
+    unsigned long currentTime = millis();
+
+    if (currentTime - lastBreathTime >= 10) {
+        lastBreathTime = currentTime;
+
+        breathBrightness = 127.5 + 127.5 * sin(breathDirection * currentTime / 1000.0);
+        breathBrightness = constrain(breathBrightness, 0, 255);
+
+        analogWrite(GREEN_LED, 255 - breathBrightness);
+    }
+}
+
+// 广播MAC地址
+void broadcastMacAddress() {
+    TouchData data = {0, 0, millis(), false, true, currentColor, false, currentPenSize};
+    sendTouchData(data);
+}
+
+// 平均触摸点
+XY_structure averageXY() {
+    TS_Point p = ts.getPoint();
+    bool fly = false;
+    int cnt = 0;
+    int i, j, k, min, temp;
+    int tmp[2][10];
+    XY_structure XY;
+
+    for (cnt = 0; cnt <= 9; cnt++) {
+        TS_Point p = ts.getPoint();
+        if (p.z > 200) {
+            tmp[0][cnt] = p.x;
+            tmp[1][cnt] = p.y;
+            delay(2);
+        } else {
+            fly = true;
+            break;
+        }
+    }
+
+    if (fly) {
+        XY.fly = fly;
+        return XY;
+    }
+
+    for (k = 0; k < 2; k++) {
+        for (i = 0; i < cnt - 1; i++) {
+            min = i;
+            for (j = i + 1; j < cnt; j++) {
+                if (tmp[k][min] > tmp[k][j]) min = j;
+            }
+            temp = tmp[k][i];
+            tmp[k][i] = tmp[k][min];
+            tmp[k][min] = temp;
+        }
+    }
+
+    XY.x = (tmp[0][3] + tmp[0][4] + tmp[0][5] + tmp[0][6]) / 4;
+    XY.y = (tmp[1][3] + tmp[1][4] + tmp[1][5] + tmp[1][6]) / 4;
+    XY.fly = false;
+    return XY;
+}
+
+void setup() {
+    Serial.begin(115200);
+    pinMode(BUTTON_IO0, INPUT_PULLUP);
+    pinMode(BATTERY_PIN, INPUT);
+
+    pinMode(GREEN_LED, OUTPUT);
+    analogWriteResolution(GREEN_LED, 8);
+    analogWriteFrequency(GREEN_LED, 5000);
+    analogWrite(GREEN_LED, 255);
+
+    pinMode(BLUE_LED, OUTPUT);
+    pinMode(RED_LED, OUTPUT);
+    analogWriteResolution(BLUE_LED, 8);
+    analogWriteResolution(RED_LED, 8);
+    analogWriteFrequency(BLUE_LED, 5000);
+    analogWriteFrequency(RED_LED, 5000);
+    analogWrite(BLUE_LED, 255);
+    analogWrite(RED_LED, 255);
+
+    pinMode(TFT_BL, OUTPUT);
+    digitalWrite(TFT_BL, HIGH);
+
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("Error initializing ESP-NOW");
+        return;
+    }
+
+    esp_now_peer_info_t peerInfo;
+    memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+    peerInfo.channel = 1;
+    peerInfo.encrypt = false;
+
+    if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+        Serial.println("Failed to add peer");
+        return;
+    }
+
+    esp_now_register_recv_cb(OnDataRecv);
+
+    mySpi.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
+    ts.begin(mySpi);
+    ts.setRotation(1);
+
+    tft.init();
+    tft.setRotation(1);
+    tft.fillScreen(TFT_BLACK);
+
+    drawMainInterface();
+}
+
+void drawMainInterface() {
+    tft.fillScreen(TFT_BLACK);
+    drawToolbar();
+}
+
+void clearScreenAndCache() {
+    tft.fillScreen(TFT_BLACK);
+    drawToolbar();
+    lastLocalPoint = {0, 0, 0};
+    lastRemotePoint = {0, 0, 0};
+    lastLocalTouchTime = 0;
+    lastRemoteTime = 0;
+    remoteDrawings.clear();
+}
+
+void loop() {
+    handleLocalTouch();
+    handleRemoteTouch();
+
+    if (!isScreenOn && hasNewUpdateWhileScreenOff) {
+        updateBreathLED();
+    } else {
+        analogWrite(GREEN_LED, 255);
+    }
+
+    if (!isScreenOn) {
+        if (macSet.size() > 0) {
+            analogWrite(BLUE_LED, 255 - BLUE_LED_DIM);
+        } else {
+            analogWrite(BLUE_LED, 255);
+        }
+        analogWrite(RED_LED, 255 - RED_LED_DIM);
+    } else {
+        analogWrite(BLUE_LED, 255);
+        analogWrite(RED_LED, 255);
+    }
+
+    static unsigned long pressStartTime = 0;
+
+    if (digitalRead(BUTTON_IO0) == LOW) {
+        if (pressStartTime == 0) {
+            pressStartTime = millis();
+        }
+
+        if (millis() - pressStartTime >= 2000) {
+            Serial.println("Entering deep sleep mode...");
+            esp_deep_sleep_start();
+        }
+    } else {
+        if (pressStartTime > 0 && millis() - pressStartTime < 2000) {
+            if (isScreenOn) {
+                digitalWrite(TFT_BL, LOW);
+                isScreenOn = false;
+            } else {
+                digitalWrite(TFT_BL, HIGH);
+                analogWrite(GREEN_LED, 255);
+                hasNewUpdateWhileScreenOff = false;
+                isScreenOn = true;
+                drawToolbar();
+            }
+        }
+        pressStartTime = 0;
+    }
+
+    unsigned long currentTime = millis();
+    if (currentTime - lastBroadcastTime >= BROADCAST_INTERVAL) {
+        broadcastMacAddress();
+        lastBroadcastTime = currentTime;
+
+        if (isScreenOn && !inColorWheelMode && !showColorPopup && !showEraserPopup) {
+            drawToolbar();
+        }
+
+        Serial.print("Connected devices: ");
+        Serial.println(macSet.size());
+    }
+}
