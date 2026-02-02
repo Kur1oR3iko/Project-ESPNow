@@ -29,15 +29,17 @@ http://www.lcdwiki.com/zh/2.8inch_ESP32-32E_Display
 
 ![8530af4605c7a8154c7da3b1ee96273](https://github.com/user-attachments/assets/0cfb522a-4bcd-4fe0-ae9b-543b141c9642)
 
-软件安装好后请安装库，开发板管理器中安装ESP32库、其他库中安装TFT_eSPl和XPT2046_Touchscreen如下图所示
+软件安装好后请安装库，开发板管理器中安装ESP32库、其他库中安装TFT_eSPl和XPT2046_Touchscreen还有SD如下图所示
 
 ![0de05df178e2b08b54926ae1c88cdae](https://github.com/user-attachments/assets/90418fd9-bcc1-4446-a9f6-36c669638444)
 ![440da2c0a98be0fd6a5adc249efe432](https://github.com/user-attachments/assets/6398bf2c-6574-4ca7-817d-8f34544c15ce)
 ![6537afb5af77f23defc3eefc73c458d](https://github.com/user-attachments/assets/acfadf4d-358b-4e83-a0da-104a2d96e4e2)
+![Uploading 0d8c2915-e3d1-4344-98b4-7dab010e831c.png…]()
 
-检查一下，TFT_eSPl和XPT2046_Touchscreen同样重要，不要漏了
 
-#### 请注意，ESP32库耗时漫长且不一定能一次下载成功，故建议你提前一两天安装
+检查一下不要漏了
+
+#### 请注意，ESP32库耗时漫长且不一定能一次下载成功，也可以尝试这里的离线部署https://blog.csdn.net/Lucife0/article/details/145548563
 
 ### 2.修改TFT的setup.h
 详见主页User_Setup.h和其相关介绍
