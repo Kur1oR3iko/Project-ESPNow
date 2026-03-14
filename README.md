@@ -8,7 +8,7 @@ http://www.lcdwiki.com/zh/2.8inch_ESP32-32E_Display
 
 ![f32e759b6bf46be3565b28ebbf2d13e](https://github.com/user-attachments/assets/9870ed31-667e-4ff3-ab37-1c473c22b1a5)
 
-这里例举一个赛博小偷，闲鱼“山顶洞河姆渡“，个人链接[，](https://m.tb.cn/h.iVbROx9?tk=V14jUDMHnVy)商品详情[，](https://m.tb.cn/h.iVLLW1b?tk=qhyNUDMBdVY)这点玩意竟然敢卖450，真是想钱想疯了。这么干的话家里两位怎么办？感谢群友检举这个小偷，我的愤怒之情不亚于这位小偷多年前其父亲看见其母和隔壁Mr王共处一室（打麻将）的程度。
+这里例举一个赛博小偷，闲鱼“山顶洞河姆渡“，个人链接[小偷个人链接](https://m.tb.cn/h.iVbROx9?tk=V14jUDMHnVy)商品详情[小偷商品链接](https://m.tb.cn/h.iVLLW1b?tk=qhyNUDMBdVY)这点玩意竟然敢卖450，真是想钱想疯了。这么干的话家里两位怎么办？感谢群友检举这个小偷，我的愤怒之情不亚于这位小偷多年前其父亲看见其母和隔壁Mr王共处一室（打麻将）的程度。
 
 
 现在提供简明烧录指北，需要的材料有：电脑、板子、数据线、手和眼睛（以Windows为例，我相信会用Linux和MAC的哥们不需要我这样的指北）
